@@ -26,6 +26,10 @@ the same pattern.
 - Refreshes automatically when the git-dir's `HEAD`/`index`/`refs` change
   (e.g. from a `git commit` you ran in a terminal) or when you save a file.
 
+See [SETUP.md](SETUP.md) for a full walkthrough of setting up a second
+git-dir from scratch (or adding one to an existing project) and how the
+ignore-file wiring works, before jumping to install.
+
 ## Install
 
 1. `npm install`
