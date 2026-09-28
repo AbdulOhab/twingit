@@ -105,7 +105,18 @@ fresh repo tracks everything:
 
 ### 4. Drive the second repo
 
-Every command needs the `--git-dir`/`--work-tree` flags, so wrap it:
+Every command needs the `--git-dir`/`--work-tree` flags. Without a wrapper
+script, just pass them directly on every invocation:
+
+```bash
+git --git-dir=notes-repo --work-tree=. add -A
+git --git-dir=notes-repo --work-tree=. commit -m "first notes commit"
+git --git-dir=notes-repo --work-tree=. remote add origin git@github.com:you/myproject-notes.git
+git --git-dir=notes-repo --work-tree=. push -u origin main
+```
+
+That's the whole mechanism — no script required. A wrapper is purely a
+convenience once you're tired of retyping the flags:
 
 ```bash
 #!/usr/bin/env bash
