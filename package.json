@@ -1,0 +1,85 @@
+{
+  "name": "twingit-scm",
+  "displayName": "TwinGit",
+  "description": "Adds a second, independent Source Control panel for a secondary git-dir (e.g. .notes.git) living in the same working tree as your main repo, alongside the built-in Git extension.",
+  "version": "0.1.0",
+  "publisher": "AbdulOhab",
+  "author": "Abudl Ohab <abdulohab059@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AbdulOhab/twingit.git"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "twinGit.refresh", "title": "Refresh", "icon": "$(refresh)", "category": "TwinGit" },
+      { "command": "twinGit.stageAll", "title": "Stage All Changes", "icon": "$(add)", "category": "TwinGit" },
+      { "command": "twinGit.unstageAll", "title": "Unstage All Changes", "icon": "$(remove)", "category": "TwinGit" },
+      { "command": "twinGit.stage", "title": "Stage Change", "icon": "$(add)", "category": "TwinGit" },
+      { "command": "twinGit.unstage", "title": "Unstage Change", "icon": "$(remove)", "category": "TwinGit" },
+      { "command": "twinGit.discard", "title": "Discard Changes", "icon": "$(discard)", "category": "TwinGit" },
+      { "command": "twinGit.commit", "title": "Commit", "icon": "$(check)", "category": "TwinGit" },
+      { "command": "twinGit.push", "title": "Push", "icon": "$(cloud-upload)", "category": "TwinGit" },
+      { "command": "twinGit.pull", "title": "Pull", "icon": "$(cloud-download)", "category": "TwinGit" },
+      { "command": "twinGit.openChange", "title": "Open Change", "category": "TwinGit" }
+    ],
+    "menus": {
+      "scm/title": [
+        { "command": "twinGit.commit", "group": "navigation", "when": "scmProvider == twinGit" },
+        { "command": "twinGit.push", "group": "navigation", "when": "scmProvider == twinGit" },
+        { "command": "twinGit.pull", "group": "navigation", "when": "scmProvider == twinGit" },
+        { "command": "twinGit.refresh", "group": "navigation", "when": "scmProvider == twinGit" }
+      ],
+      "scm/resourceGroup/context": [
+        { "command": "twinGit.stageAll", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "inline" },
+        { "command": "twinGit.unstageAll", "when": "scmProvider == twinGit && scmResourceGroup == staged", "group": "inline" }
+      ],
+      "scm/resourceState/context": [
+        { "command": "twinGit.stage", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "inline" },
+        { "command": "twinGit.unstage", "when": "scmProvider == twinGit && scmResourceGroup == staged", "group": "inline" },
+        { "command": "twinGit.discard", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "1_modification" }
+      ],
+      "commandPalette": [
+        { "command": "twinGit.openChange", "when": "false" }
+      ]
+    },
+    "configuration": {
+      "title": "TwinGit",
+      "properties": {
+        "twinGit.gitDir": {
+          "type": "string",
+          "default": ".notes.git",
+          "description": "Path (relative to the workspace folder root) to the secondary git directory to expose as its own Source Control panel."
+        },
+        "twinGit.label": {
+          "type": "string",
+          "default": "Notes",
+          "description": "Label shown for the secondary Source Control panel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --allow-missing-repository -o twingit-scm.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.5.4"
+  }
+}
