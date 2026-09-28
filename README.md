@@ -1,3 +1,5 @@
+<img src="icon.png" width="64" height="64" alt="TwinGit logo">
+
 # TwinGit
 
 Adds a second, independent **Source Control** panel for a secondary git

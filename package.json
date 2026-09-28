@@ -3,6 +3,7 @@
   "displayName": "TwinGit",
   "description": "Adds a second, independent Source Control panel for a secondary git-dir (e.g. .notes.git) living in the same working tree as your main repo, alongside the built-in Git extension.",
   "version": "0.1.0",
+  "icon": "icon.png",
   "license": "MIT",
   "publisher": "AbdulOhab",
   "author": "Abudl Ohab <abdulohab059@gmail.com>",
