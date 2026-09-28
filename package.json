@@ -3,6 +3,7 @@
   "displayName": "TwinGit",
   "description": "Adds a second, independent Source Control panel for a secondary git-dir (e.g. .notes.git) living in the same working tree as your main repo, alongside the built-in Git extension.",
   "version": "0.1.0",
+  "license": "MIT",
   "publisher": "AbdulOhab",
   "author": "Abudl Ohab <abdulohab059@gmail.com>",
   "repository": {
@@ -32,7 +33,10 @@
       { "command": "twinGit.commit", "title": "Commit", "icon": "$(check)", "category": "TwinGit" },
       { "command": "twinGit.push", "title": "Push", "icon": "$(cloud-upload)", "category": "TwinGit" },
       { "command": "twinGit.pull", "title": "Pull", "icon": "$(cloud-download)", "category": "TwinGit" },
-      { "command": "twinGit.openChange", "title": "Open Change", "category": "TwinGit" }
+      { "command": "twinGit.openChange", "title": "Open Change", "category": "TwinGit" },
+      { "command": "twinGit.moveToCode", "title": "Move to Code Repo", "icon": "$(arrow-swap)", "category": "TwinGit" },
+      { "command": "twinGit.moveToNotes", "title": "Move to Notes Repo", "icon": "$(arrow-swap)", "category": "TwinGit" },
+      { "command": "twinGit.sync", "title": "Sync (Pull + Push)", "icon": "$(sync)", "category": "TwinGit" }
     ],
     "menus": {
       "scm/title": [
@@ -48,7 +52,9 @@
       "scm/resourceState/context": [
         { "command": "twinGit.stage", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "inline" },
         { "command": "twinGit.unstage", "when": "scmProvider == twinGit && scmResourceGroup == staged", "group": "inline" },
-        { "command": "twinGit.discard", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "1_modification" }
+        { "command": "twinGit.discard", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "1_modification" },
+        { "command": "twinGit.moveToCode", "when": "scmProvider == twinGit", "group": "2_move" },
+        { "command": "twinGit.moveToNotes", "when": "scmProvider == git && scmResourceGroup != merge", "group": "2_move" }
       ],
       "commandPalette": [
         { "command": "twinGit.openChange", "when": "false" }
