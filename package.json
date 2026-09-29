@@ -37,7 +37,9 @@
       { "command": "twinGit.openChange", "title": "Open Change", "category": "TwinGit" },
       { "command": "twinGit.moveToCode", "title": "Move to Code Repo", "icon": "$(arrow-swap)", "category": "TwinGit" },
       { "command": "twinGit.moveToNotes", "title": "Move to Notes Repo", "icon": "$(arrow-swap)", "category": "TwinGit" },
-      { "command": "twinGit.sync", "title": "Sync (Pull + Push)", "icon": "$(sync)", "category": "TwinGit" }
+      { "command": "twinGit.sync", "title": "Sync (Pull + Push)", "icon": "$(sync)", "category": "TwinGit" },
+      { "command": "twinGit.checkoutBranch", "title": "Checkout Branch...", "icon": "$(git-branch)", "category": "TwinGit" },
+      { "command": "twinGit.addToNotesRepo", "title": "Add to Notes Repo", "icon": "$(diff-added)", "category": "TwinGit" }
     ],
     "menus": {
       "scm/title": [
@@ -45,6 +47,9 @@
         { "command": "twinGit.push", "group": "navigation", "when": "scmProvider == twinGit" },
         { "command": "twinGit.pull", "group": "navigation", "when": "scmProvider == twinGit" },
         { "command": "twinGit.refresh", "group": "navigation", "when": "scmProvider == twinGit" }
+      ],
+      "explorer/context": [
+        { "command": "twinGit.addToNotesRepo", "when": "workspaceFolderCount != 0", "group": "6_copypath" }
       ],
       "scm/resourceGroup/context": [
         { "command": "twinGit.stageAll", "when": "scmProvider == twinGit && scmResourceGroup == changes", "group": "inline" },

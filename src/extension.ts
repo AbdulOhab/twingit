@@ -15,6 +15,15 @@ interface StatusEntry {
   relPath: string;
 }
 
+interface BranchInfo {
+  name: string; // e.g. "main" or "origin/main"
+  hash: string;
+  relativeDate: string;
+  author: string;
+  subject: string;
+  remote: boolean;
+}
+
 /**
  * One instance per workspace folder that has the configured secondary
  * git-dir. Wraps that git-dir with its own vscode.scm SourceControl —
@@ -31,6 +40,7 @@ class TwinGitRepository implements vscode.Disposable {
 
   private statusByPath = new Map<string, { code: string; staged: boolean }>();
   private trackedScope = new Set<string>();
+  private readonly branchStatusBarItem: vscode.StatusBarItem;
   private readonly statusBarItem: vscode.StatusBarItem;
 
   constructor(
@@ -38,7 +48,14 @@ class TwinGitRepository implements vscode.Disposable {
     public readonly gitDirAbs: string,
     public readonly label: string,
   ) {
-    this.sc = vscode.scm.createSourceControl(SCM_ID, label, vscode.Uri.file(root));
+    // rootUri deliberately points at the git-dir, not the work tree. VS Code's
+    // "Select the active repository" picker ignores the label we pass here and
+    // derives its own name+description from rootUri whenever rootUri exactly
+    // equals a workspace folder root — which it would if we passed `root`,
+    // making this entry indistinguishable from the built-in Git extension's
+    // own repo (same folder name, same path). Pointing at gitDirAbs instead
+    // gives that picker a distinct name (".notes.git") and path to show.
+    this.sc = vscode.scm.createSourceControl(SCM_ID, label, vscode.Uri.file(gitDirAbs));
     this.sc.inputBox.placeholder = `Message (${label} repo)`;
     this.sc.acceptInputCommand = { command: 'twinGit.commit', title: 'Commit', arguments: [this] };
 
@@ -46,10 +63,29 @@ class TwinGitRepository implements vscode.Disposable {
     this.changes = this.sc.createResourceGroup('changes', 'Changes');
     this.staged.hideWhenEmpty = true;
 
+    // Two items, mirroring the built-in Git extension's own branch-name +
+    // sync-icon pair: a branch item that pops the checkout picker (priority
+    // 91, so it sits left of the sync icon) and a plain sync item (priority
+    // 90) that just pulls + pushes. Splitting them matches what users expect
+    // from clicking a "branch: name" status item — a popup — instead of
+    // quietly running a sync with no visible menu.
+    this.branchStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 91);
+    this.branchStatusBarItem.command = {
+      command: 'twinGit.checkoutBranch',
+      title: 'Checkout Branch',
+      arguments: [this],
+    };
+
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
     this.statusBarItem.command = { command: 'twinGit.sync', title: 'Sync', arguments: [this] };
 
-    this.disposables.push(this.sc, this.staged, this.changes, this.statusBarItem);
+    this.disposables.push(
+      this.sc,
+      this.staged,
+      this.changes,
+      this.branchStatusBarItem,
+      this.statusBarItem,
+    );
 
     const gitDirRel = path.relative(this.root, this.gitDirAbs);
     const watcher = vscode.workspace.createFileSystemWatcher(
@@ -168,14 +204,68 @@ class TwinGitRepository implements vscode.Disposable {
     }
   }
 
-  /** Branch name + ahead/behind vs upstream, e.g. "$(sync) Notes: main ↑2 ↓1".
+  async currentBranch(): Promise<string> {
+    const { stdout } = await this.run(['rev-parse', '--abbrev-ref', 'HEAD']);
+    return stdout.trim();
+  }
+
+  /** Local + remote-tracking branches with enough commit detail (hash, relative
+   * date, author, subject) to render a checkout picker like the built-in Git
+   * extension's — instead of just bare names. `origin/HEAD` is excluded since
+   * it's a pointer, not something you'd check out. */
+  async listBranchInfos(): Promise<BranchInfo[]> {
+    const fmt = '%(refname:short)%00%(objectname:short)%00%(committerdate:relative)%00%(authorname)%00%(subject)';
+    const parse = (out: string, remote: boolean): BranchInfo[] =>
+      out
+        .split('\n')
+        .filter((l) => l.trim().length > 0)
+        .map((line) => {
+          const [name, hash, relativeDate, author, subject] = line.split('\0');
+          return { name, hash, relativeDate, author, subject, remote };
+        });
+
+    const [{ stdout: localOut }, { stdout: remoteOut }] = await Promise.all([
+      this.run(['for-each-ref', `--format=${fmt}`, 'refs/heads/']),
+      this.run(['for-each-ref', `--format=${fmt}`, 'refs/remotes/']),
+    ]);
+
+    return [
+      ...parse(localOut, false),
+      ...parse(remoteOut, true).filter((b) => !b.name.endsWith('/HEAD')),
+    ];
+  }
+
+  async checkout(branch: string): Promise<void> {
+    await this.run(['checkout', branch]);
+    await this.refresh();
+  }
+
+  /** Checks out a remote branch (e.g. "origin/feature-x") as a new local
+   * tracking branch, or switches to the already-existing local branch of the
+   * same name if one's there. */
+  async checkoutRemote(remoteBranch: string): Promise<void> {
+    const localName = remoteBranch.replace(/^[^/]+\//, '');
+    try {
+      await this.run(['checkout', '-b', localName, '--track', remoteBranch]);
+    } catch {
+      await this.run(['checkout', localName]);
+    }
+    await this.refresh();
+  }
+
+  async createBranch(name: string): Promise<void> {
+    await this.run(['checkout', '-b', name]);
+    await this.refresh();
+  }
+
+  /** Branch item: "$(git-branch) Notes: main ↑2 ↓1" — click opens the
+   * checkout picker. Sync item: a bare "$(sync)" icon — click pulls + pushes.
    * Ahead/behind is a purely local comparison against the last-fetched
    * remote-tracking ref — no network call, so this is cheap to run on every
-   * refresh. Silently hides the item if there's no commit yet (fresh repo). */
+   * refresh. Silently hides both items if there's no commit yet (fresh repo). */
   private async updateStatusBar(): Promise<void> {
     try {
-      const { stdout: branchOut } = await this.run(['rev-parse', '--abbrev-ref', 'HEAD']);
-      const branch = branchOut.trim();
+      const branch = await this.currentBranch();
 
       let aheadBehind = '';
       try {
@@ -194,18 +284,37 @@ class TwinGitRepository implements vscode.Disposable {
         // no upstream configured — just show the branch name
       }
 
-      this.statusBarItem.text = `$(sync) ${this.label}: ${branch}${aheadBehind}`;
+      this.branchStatusBarItem.text = `$(git-branch) ${this.label}: ${branch}${aheadBehind}`;
+      this.branchStatusBarItem.tooltip = `${this.label} repo (${branch}) — click to checkout a branch`;
+      this.branchStatusBarItem.show();
+
+      this.statusBarItem.text = '$(sync)';
       this.statusBarItem.tooltip = `${this.label} repo (${branch}) — click to sync (pull + push)`;
       this.statusBarItem.show();
     } catch {
+      this.branchStatusBarItem.hide();
       this.statusBarItem.hide();
     }
   }
 
   async sync(): Promise<void> {
-    await this.pull();
-    await this.push();
-    await this.refresh();
+    // Local pull/push against an already-synced repo finishes in well under a
+    // second, so the only feedback the user had (a message flashed at the
+    // status bar's far-left "global message" slot) was easy to miss entirely
+    // if they were looking at the item they'd just clicked, on the right.
+    // Flashing state in this item itself — where their eyes already are —
+    // makes the click's effect visible regardless of how fast the sync is.
+    this.statusBarItem.text = '$(sync~spin)';
+    try {
+      await this.pull();
+      await this.push();
+    } finally {
+      await this.refresh();
+    }
+    this.statusBarItem.text = '$(check)';
+    setTimeout(() => {
+      this.statusBarItem.text = '$(sync)';
+    }, 1500);
   }
 
   /** All paths committed at HEAD; empty (not an error) for a brand-new repo with no commits yet. */
@@ -240,6 +349,7 @@ class TwinGitRepository implements vscode.Disposable {
     if (status) return fileDecorationForCode(status.code, status.staged);
     if (this.trackedScope.has(fsPath)) {
       return {
+        badge: '·',
         color: new vscode.ThemeColor('foreground'),
         tooltip: `Tracked by ${this.label} repo`,
       };
@@ -400,6 +510,142 @@ async function appendIgnoreOverride(excludeFile: string, relPath: string): Promi
  * never named `.git` and so is never what plain discovery finds. */
 function runPlainGit(root: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return execFile('git', args, { cwd: root, maxBuffer: 20 * 1024 * 1024 });
+}
+
+// --- .gitignore.note manifest: the single source of truth for which
+// top-level-ish paths belong to the secondary (notes) repo instead of the
+// primary one. Mirrors a project-local tools/sync-notes-exclude.sh workflow
+// some TwinGit users maintain by hand; this reimplements that generation
+// natively so it works without bash/a project script, and confines itself
+// to a marked block in each exclude file so it never clobbers the per-file
+// overrides `appendIgnoreOverride` (above) writes to the same files.
+
+const MANIFEST_FILE = '.gitignore.note';
+const MANIFEST_BEGIN =
+  '# BEGIN notes-manifest (generated by TwinGit from .gitignore.note — do not hand-edit this block)';
+const MANIFEST_END = '# END notes-manifest';
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function readManifest(root: string): Promise<string[]> {
+  try {
+    const content = await fs.promises.readFile(path.join(root, MANIFEST_FILE), 'utf8');
+    return content
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'));
+  } catch {
+    return [];
+  }
+}
+
+async function writeManifest(root: string, gitDirRel: string, paths: string[]): Promise<void> {
+  const header = [
+    '# Single source of truth for which paths belong to the private notes repo',
+    `# (${gitDirRel}) instead of the public code repo (.git).`,
+    '#',
+    '# Tracked ONLY by the notes repo — never by .git (a tracked copy in the',
+    '# public repo would itself advertise that this private path set exists).',
+    '#',
+    '# Managed by the TwinGit extension\'s "Add to Notes Repo" command — hand-',
+    '# editing this list is fine too, the next add/reload will pick it up.',
+    '',
+  ].join('\n');
+  await fs.promises.writeFile(
+    path.join(root, MANIFEST_FILE),
+    header + paths.join('\n') + '\n',
+    'utf8',
+  );
+}
+
+/** No-dot-in-basename heuristic, same as the bash tooling this mirrors —
+ * used only as a fallback for a manifest entry that no longer exists on
+ * disk (e.g. deleted since being added) so regeneration never breaks. */
+async function isDirPattern(root: string, relPath: string): Promise<boolean> {
+  try {
+    return (await fs.promises.stat(path.join(root, relPath))).isDirectory();
+  } catch {
+    return !path.basename(relPath).includes('.');
+  }
+}
+
+function buildCodeExcludeBlock(paths: string[], dirFlags: boolean[], gitDirRel: string): string[] {
+  const lines = paths.map((p, i) => (dirFlags[i] ? `/${p}/` : `/${p}`));
+  lines.push(`/${gitDirRel}/`);
+  return lines;
+}
+
+/** A plain `/*` denies everything, then each manifest entry's ancestor
+ * chain is un-pruned one level at a time (immediately re-denying that
+ * level's other contents) before the entry itself is allowed back — a
+ * directory-excluded path can't be re-included without that, since git
+ * won't even evaluate rules for paths under a pruned directory. */
+function buildNotesExcludeBlock(paths: string[], dirFlags: boolean[]): string[] {
+  const lines: string[] = ['/*'];
+  paths.forEach((p, i) => {
+    const parts = p.split('/');
+    let prefix = '';
+    for (let j = 0; j < parts.length - 1; j++) {
+      prefix += parts[j];
+      lines.push(`!/${prefix}`);
+      lines.push(`/${prefix}/*`);
+      prefix += '/';
+    }
+    if (dirFlags[i]) {
+      lines.push(`!/${p}`);
+      lines.push(`!/${p}/**`);
+    } else {
+      lines.push(`!/${p}`);
+    }
+  });
+  return lines;
+}
+
+/** Replaces the MANIFEST_BEGIN..MANIFEST_END block in excludeFile, leaving
+ * everything else (per-file overrides, unrelated hand-written entries)
+ * untouched; appends the block if the file has none yet. */
+async function replaceGeneratedBlock(excludeFile: string, blockLines: string[]): Promise<void> {
+  let content = '';
+  try {
+    content = await fs.promises.readFile(excludeFile, 'utf8');
+  } catch {
+    // file doesn't exist yet — fine, we'll create it
+  }
+  const block = [MANIFEST_BEGIN, ...blockLines, MANIFEST_END].join('\n');
+  const blockRe = new RegExp(`${escapeRegExp(MANIFEST_BEGIN)}[\\s\\S]*?${escapeRegExp(MANIFEST_END)}`);
+  const next = blockRe.test(content)
+    ? content.replace(blockRe, block)
+    : (content.length > 0 && !content.endsWith('\n') ? content + '\n' : content) +
+      (content.length > 0 ? '\n' : '') +
+      block +
+      '\n';
+  await fs.promises.mkdir(path.dirname(excludeFile), { recursive: true });
+  await fs.promises.writeFile(excludeFile, next, 'utf8');
+}
+
+/** Adds relPath to the notes-repo manifest and regenerates the generated
+ * block in both exclude files to match — the native equivalent of editing
+ * .gitignore.note and re-running tools/sync-notes-exclude.sh by hand. */
+async function addPathToNotesRepo(repo: TwinGitRepository, relPath: string): Promise<void> {
+  const existing = await readManifest(repo.root);
+  if (existing.includes(relPath)) return;
+
+  const paths = [...existing, relPath].sort();
+  const dirFlags = await Promise.all(paths.map((p) => isDirPattern(repo.root, p)));
+  const gitDirRel = path.relative(repo.root, repo.gitDirAbs);
+
+  await writeManifest(repo.root, gitDirRel, paths);
+  await replaceGeneratedBlock(
+    path.join(repo.root, '.git', 'info', 'exclude'),
+    buildCodeExcludeBlock(paths, dirFlags, gitDirRel),
+  );
+  await replaceGeneratedBlock(
+    path.join(repo.gitDirAbs, 'info', 'exclude'),
+    buildNotesExcludeBlock(paths, dirFlags),
+  );
+  await repo.refresh();
 }
 
 function describeCode(code: string): { icon: vscode.ThemeIcon; label: string } {
@@ -718,7 +964,108 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
+    vscode.commands.registerCommand('twinGit.checkoutBranch', async (repo?: TwinGitRepository) => {
+      const r = repo instanceof TwinGitRepository ? repo : await pickRepo();
+      if (!r) return;
+      try {
+        const [infos, current] = await Promise.all([r.listBranchInfos(), r.currentBranch()]);
+
+        type BranchPickItem = vscode.QuickPickItem & { create?: boolean; branch?: BranchInfo };
+        const items: BranchPickItem[] = [{ label: '$(add) Create new branch...', create: true }];
+
+        const locals = infos.filter((b) => !b.remote);
+        if (locals.length) {
+          items.push({ label: 'branches', kind: vscode.QuickPickItemKind.Separator });
+          for (const b of locals) {
+            items.push({
+              label: b.name === current ? `$(check) ${b.name}` : b.name,
+              description: b.relativeDate,
+              detail: `${b.author} • ${b.hash} • ${b.subject}`,
+              branch: b,
+            });
+          }
+        }
+
+        const remotes = infos.filter((b) => b.remote);
+        if (remotes.length) {
+          items.push({ label: 'remote branches', kind: vscode.QuickPickItemKind.Separator });
+          for (const b of remotes) {
+            items.push({
+              label: b.name,
+              description: b.relativeDate,
+              detail: `${b.author} • ${b.hash} • ${b.subject}`,
+              branch: b,
+            });
+          }
+        }
+
+        const pick = await vscode.window.showQuickPick(items, {
+          placeHolder: `Select a branch to checkout (${r.label} repo)`,
+          matchOnDescription: true,
+          matchOnDetail: true,
+        });
+        if (!pick) return;
+
+        if (pick.create) {
+          const name = await vscode.window.showInputBox({
+            prompt: `New branch name (${r.label} repo)`,
+            validateInput: (v) => (v.trim().length === 0 ? 'Branch name cannot be empty' : undefined),
+          });
+          if (!name) return;
+          await r.createBranch(name.trim());
+          vscode.window.setStatusBarMessage(`${r.label} repo: created ${name.trim()}`, 3000);
+          return;
+        }
+
+        if (!pick.branch || pick.branch.name === current) return;
+        if (pick.branch.remote) {
+          await r.checkoutRemote(pick.branch.name);
+        } else {
+          await r.checkout(pick.branch.name);
+        }
+        vscode.window.setStatusBarMessage(`${r.label} repo: switched to ${pick.branch.name}`, 3000);
+      } catch (e) {
+        void vscode.window.showErrorMessage(`Checkout failed: ${errText(e)}`);
+      }
+    }),
+
     vscode.commands.registerCommand('twinGit.openChange', openChange),
+
+    // Explorer right-click on any file/folder, OR the Command Palette with no
+    // selection (in which case a native file/folder picker stands in for the
+    // click target): adds the path to the notes-repo manifest
+    // (.gitignore.note) and regenerates both exclude files, so it shows up
+    // under the Notes source control instead of Code without any manual file
+    // editing or running tools/sync-notes-exclude.sh by hand.
+    vscode.commands.registerCommand('twinGit.addToNotesRepo', async (uri?: vscode.Uri) => {
+      if (!uri) {
+        const repo = await pickRepo();
+        if (!repo) return;
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: true,
+          canSelectMany: false,
+          defaultUri: vscode.Uri.file(repo.root),
+          openLabel: 'Add to Notes Repo',
+        });
+        if (!picked || picked.length === 0) return;
+        uri = picked[0];
+      }
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      const repo = folder ? repoRegistry.get(folder.uri.fsPath) : undefined;
+      if (!repo) {
+        void vscode.window.showWarningMessage('No Notes repo (.notes.git) found for this workspace folder.');
+        return;
+      }
+      const relPath = path.relative(repo.root, uri.fsPath).split(path.sep).join('/');
+      if (!relPath || relPath.startsWith('..')) return;
+      try {
+        await addPathToNotesRepo(repo, relPath);
+        vscode.window.setStatusBarMessage(`Added ${relPath} to the ${repo.label} repo`, 3000);
+      } catch (e) {
+        void vscode.window.showErrorMessage(`Add to Notes repo failed: ${errText(e)}`);
+      }
+    }),
 
     // Notes panel → Code repo: force-add there, remove-cached + ignore-override here.
     vscode.commands.registerCommand(
