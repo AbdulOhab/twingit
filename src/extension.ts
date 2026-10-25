@@ -157,11 +157,13 @@ class TwinGitRepository implements vscode.Disposable {
     this.refreshTimer = setTimeout(() => void this.refresh(), delayMs);
   }
 
-  private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    return execFile('git', ['--git-dir', this.gitDirAbs, '--work-tree', this.root, ...args], {
+  private run(args: string[], input?: string): Promise<{ stdout: string; stderr: string }> {
+    const p = execFile('git', ['--git-dir', this.gitDirAbs, '--work-tree', this.root, ...args], {
       cwd: this.root,
       maxBuffer: 20 * 1024 * 1024,
     });
+    if (input !== undefined) p.child.stdin?.end(input);
+    return p;
   }
 
   async refresh(): Promise<void> {
@@ -357,6 +359,29 @@ class TwinGitRepository implements vscode.Disposable {
     return undefined;
   }
 
+  /** Whether fsPath is a file (or an ancestor directory of a file) this
+   * repo's manifest actually covers — a cheap in-memory check so inline
+   * blame doesn't shell out to `git blame` for files the notes repo plainly
+   * has nothing to do with. */
+  isTracked(fsPath: string): boolean {
+    return this.trackedScope.has(fsPath);
+  }
+
+  /** Author + commit time for whatever line last touched `line` (1-based),
+   * straight from this repo's own history — the notes-repo equivalent of
+   * the built-in Git extension's inline blame, which only ever looks at
+   * `.git` and so never has anything to say about a notes-only file.
+   * Returns undefined for an uncommitted line (all-zero blame hash) or any
+   * line/file this repo's history doesn't have an answer for. */
+  async blameLine(relPath: string, line: number, contents?: string): Promise<BlameInfo | undefined> {
+    try {
+      const { stdout } = await this.run(blameArgs(relPath, line, contents), contents);
+      return parseBlamePorcelain(stdout);
+    } catch {
+      return undefined;
+    }
+  }
+
   private parseStatus(stdout: string): StatusEntry[] {
     return stdout
       .split('\0')
@@ -508,8 +533,58 @@ async function appendIgnoreOverride(excludeFile: string, relPath: string): Promi
  * against whatever repo `git` would normally find there. In this extension's
  * use, that's always the primary/code repo, since the secondary git-dir is
  * never named `.git` and so is never what plain discovery finds. */
-function runPlainGit(root: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return execFile('git', args, { cwd: root, maxBuffer: 20 * 1024 * 1024 });
+function runPlainGit(root: string, args: string[], input?: string): Promise<{ stdout: string; stderr: string }> {
+  const p = execFile('git', args, { cwd: root, maxBuffer: 20 * 1024 * 1024 });
+  if (input !== undefined) p.child.stdin?.end(input);
+  return p;
+}
+
+interface BlameInfo {
+  author: string;
+  hash: string;
+  authorTimeUnix: number;
+}
+
+/** `git blame` args for a single line. With `contents` (an editor's unsaved
+ * buffer, fed on stdin), `--contents -` blames that text instead of the file
+ * on disk — otherwise unsaved edits shift line numbers and the annotation
+ * names whoever wrote some other line. */
+function blameArgs(relPath: string, line: number, contents: string | undefined): string[] {
+  const fromStdin = contents !== undefined ? ['--contents', '-'] : [];
+  return ['blame', '-L', `${line},${line}`, '--porcelain', ...fromStdin, '--', relPath];
+}
+
+/** Shared by both blame paths below: the notes repo's own `this.run` and the
+ * primary repo's plain-discovery `runPlainGit`. Undefined for an uncommitted
+ * line — `git blame --porcelain` reports that as an all-zero hash. */
+function parseBlamePorcelain(stdout: string): BlameInfo | undefined {
+  const hash = stdout.slice(0, 40);
+  if (/^0+$/.test(hash)) return undefined;
+  let author = '';
+  let authorTimeUnix = 0;
+  for (const l of stdout.split('\n')) {
+    if (l.startsWith('author ')) author = l.slice('author '.length);
+    else if (l.startsWith('author-time ')) authorTimeUnix = Number(l.slice('author-time '.length));
+  }
+  return { author, hash: hash.slice(0, 7), authorTimeUnix };
+}
+
+/** Blame for a line via plain git discovery — i.e. against the primary
+ * `.git` repo, same as the built-in Git extension's own inline blame would
+ * use, just computed ourselves so it renders through the same decoration
+ * (and same "X ago" formatting) as the notes-repo side. */
+async function blamePrimaryLine(
+  root: string,
+  relPath: string,
+  line: number,
+  contents?: string,
+): Promise<BlameInfo | undefined> {
+  try {
+    const { stdout } = await runPlainGit(root, blameArgs(relPath, line, contents), contents);
+    return parseBlamePorcelain(stdout);
+  } catch {
+    return undefined;
+  }
 }
 
 // --- .gitignore.note manifest: the single source of truth for which
@@ -646,6 +721,30 @@ async function addPathToNotesRepo(repo: TwinGitRepository, relPath: string): Pro
     buildNotesExcludeBlock(paths, dirFlags),
   );
   await repo.refresh();
+}
+
+/** Coarse "X units ago" matching git's own relative-date wording closely
+ * enough for an inline annotation — doesn't need calendar precision. */
+function formatRelativeTime(unixSeconds: number): string {
+  let value = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));
+  const steps: [number, string][] = [
+    [60, 'second'],
+    [60, 'minute'],
+    [24, 'hour'],
+    [7, 'day'],
+    [4.345, 'week'],
+    [12, 'month'],
+  ];
+  let unit = 'year';
+  for (const [size, name] of steps) {
+    if (value < size) {
+      unit = name;
+      break;
+    }
+    value = Math.floor(value / size);
+  }
+  value = Math.max(1, value);
+  return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
 }
 
 function describeCode(code: string): { icon: vscode.ThemeIcon; label: string } {
@@ -815,6 +914,96 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, contentProvider),
   );
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(decorationProvider));
+
+  // Inline blame for notes-repo files, mirroring the built-in Git
+  // extension's own inline blame — which only ever reads `.git`, so it has
+  // nothing to show on a file the primary repo doesn't track at all.
+  const blameDecorationType = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    after: {
+      margin: '0 0 0 3em',
+      color: new vscode.ThemeColor('editorCodeLens.foreground'),
+      fontStyle: 'italic',
+    },
+  });
+  context.subscriptions.push(blameDecorationType);
+
+  let blameTimer: ReturnType<typeof setTimeout> | undefined;
+  const updateBlame = async (editor: vscode.TextEditor): Promise<void> => {
+    const doc = editor.document;
+    if (doc.uri.scheme !== 'file') return;
+    const folder = vscode.workspace.getWorkspaceFolder(doc.uri);
+    if (!folder || !vscode.workspace.getConfiguration('twinGit', doc.uri).get<boolean>('inlineBlame.enabled', true)) {
+      editor.setDecorations(blameDecorationType, []);
+      return;
+    }
+
+    const notesRepo = findRepoByUri(doc.uri);
+    const line = editor.selection.active.line;
+    const version = doc.version;
+    const contents = doc.isDirty ? doc.getText() : undefined;
+
+    let label: string;
+    let info: BlameInfo | undefined;
+    if (notesRepo && notesRepo.isTracked(doc.uri.fsPath)) {
+      const relPath = path.relative(notesRepo.root, doc.uri.fsPath).split(path.sep).join('/');
+      info = await notesRepo.blameLine(relPath, line + 1, contents);
+      label = notesRepo.label;
+    } else if (vscode.workspace.getConfiguration('git', doc.uri).get<boolean>('blame.editorDecoration.enabled', false)) {
+      // The built-in Git extension is already annotating primary-repo files;
+      // drawing ours too would put two blames on the same line.
+      editor.setDecorations(blameDecorationType, []);
+      return;
+    } else {
+      const relPath = path.relative(folder.uri.fsPath, doc.uri.fsPath).split(path.sep).join('/');
+      info = await blamePrimaryLine(folder.uri.fsPath, relPath, line + 1, contents);
+      label = 'Git';
+    }
+
+    if (
+      editor !== vscode.window.activeTextEditor ||
+      editor.selection.active.line !== line ||
+      doc.version !== version
+    ) {
+      return;
+    }
+    if (!info) {
+      editor.setDecorations(blameDecorationType, []);
+      return;
+    }
+    editor.setDecorations(blameDecorationType, [
+      {
+        range: doc.lineAt(line).range,
+        renderOptions: {
+          after: {
+            contentText: `${label}: ${info.author}, ${formatRelativeTime(info.authorTimeUnix)} • ${info.hash}`,
+          },
+        },
+      },
+    ]);
+  };
+  const scheduleBlame = (editor: vscode.TextEditor | undefined): void => {
+    if (!editor) return;
+    if (blameTimer) clearTimeout(blameTimer);
+    blameTimer = setTimeout(() => void updateBlame(editor), 200);
+  };
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeTextEditorSelection((e) => scheduleBlame(e.textEditor)),
+    vscode.window.onDidChangeActiveTextEditor(scheduleBlame),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration('twinGit.inlineBlame') && !e.affectsConfiguration('git.blame.editorDecoration')) {
+        return;
+      }
+      // Clear every visible editor, not just the active one, so a split view
+      // doesn't keep a stale annotation after the setting is switched off.
+      for (const editor of vscode.window.visibleTextEditors) {
+        editor.setDecorations(blameDecorationType, []);
+      }
+      scheduleBlame(vscode.window.activeTextEditor);
+    }),
+  );
+  scheduleBlame(vscode.window.activeTextEditor);
 
   const initFolder = (folder: vscode.WorkspaceFolder): void => {
     const cfg = vscode.workspace.getConfiguration('twinGit', folder.uri);

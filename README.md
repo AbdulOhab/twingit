@@ -37,6 +37,10 @@ the same pattern.
   built-in equivalent of hand-editing a manifest file and re-running a sync
   script, kept to a marked block so it never touches anything else you've
   added to those files.
+- Inline blame: author, relative time and short hash at the end of the
+  current line, read from the secondary git-dir for files it tracks (the
+  built-in Git extension's blame only reads `.git`, so it shows nothing
+  there). Unsaved edits are blamed as typed, not as last saved.
 - Refreshes automatically when the git-dir's `HEAD`/`index`/`refs` change
   (e.g. from a `git commit` you ran in a terminal) or when you save a file.
 - Shows up as its own distinct entry — not the same name and path as the
@@ -59,6 +63,7 @@ ignore-file wiring works, before jumping to install.
 |---|---|---|
 | `twinGit.gitDir` | `.notes.git` | Path (relative to the workspace folder root) to the secondary git-dir. |
 | `twinGit.label` | `Notes` | Label shown for the panel. |
+| `twinGit.inlineBlame.enabled` | `true` | Show inline blame on the current line. Primary-repo files are skipped while the built-in `git.blame.editorDecoration.enabled` is on, so a line never gets two blames. |
 
 ## Notes
 

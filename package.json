@@ -78,6 +78,11 @@
           "type": "string",
           "default": "Notes",
           "description": "Label shown for the secondary Source Control panel."
+        },
+        "twinGit.inlineBlame.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show author and commit time at the end of the current line. Primary-repo files are skipped while the built-in `git.blame.editorDecoration.enabled` is on, so a line never gets two annotations."
         }
       }
     }
